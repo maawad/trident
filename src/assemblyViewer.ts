@@ -2999,7 +2999,6 @@ export class AssemblyViewerPanel {
         <div class="cache-path">${this._compiler.getCachePath()}</div>
         <p>To generate assembly:</p>
         <ol style="text-align: left; display: inline-block;">
-            <li>Run <code>module load pytorch</code></li>
             <li>Execute your Triton kernel code</li>
             <li>Click the refresh button to reload</li>
         </ol>

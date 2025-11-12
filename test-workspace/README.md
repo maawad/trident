@@ -9,17 +9,12 @@ This directory contains sample Triton kernels for testing the assembly viewer ex
 
 ## Usage
 
-1. Load PyTorch module:
-   ```bash
-   module load pytorch
-   ```
-
-2. Run a kernel to generate cache:
+1. Run a kernel to generate cache:
    ```bash
    python vector_add.py
    ```
 
-3. Open the Python file in VS Code and click the split view icon to view assembly
+2. Open the Python file in VS Code and click the split view icon to view assembly
 
 ## Expected Output
 
