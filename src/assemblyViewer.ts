@@ -4,6 +4,13 @@ import { TritonCompiler, KernelAssembly } from './tritonCompiler';
 import { HighlightManager } from './highlighting';
 import { logger } from './logger';
 
+interface FilterState {
+    hideDirectives: boolean;
+    hideComments: boolean;
+    hideEmpty: boolean;
+    hiddenInstructions: string[];
+}
+
 export class AssemblyViewerPanel {
     public static currentPanel: AssemblyViewerPanel | undefined;
     private readonly _panel: vscode.WebviewPanel;
@@ -19,9 +26,9 @@ export class AssemblyViewerPanel {
     private _selectedSourceFile: string | undefined;
     private _selectedKernelIndex: number | undefined; // Track selected kernel for single-view
     private _allOpenTritonFiles: Set<string> = new Set();
-    private _diffState: { kernel1: any, kernel2: any, index1: number, index2: number } | undefined;
+    private _diffState: { kernel1: KernelAssembly, kernel2: KernelAssembly, index1: number, index2: number } | undefined;
     private _themeChangeTimeout: NodeJS.Timeout | undefined;
-    private _filterState: any = null; // Store current filter state to inherit in diff view
+    private _filterState: FilterState | null = null; // Store current filter state to inherit in diff view
     private static _isProgrammaticSelection: boolean = false; // Flag to prevent circular highlighting
     private _context: vscode.ExtensionContext | undefined;
 
@@ -887,10 +894,16 @@ export class AssemblyViewerPanel {
         const isComment = trimmedLine.startsWith('#') || trimmedLine.startsWith(';') || trimmedLine.startsWith('//');
         const isEmpty = trimmedLine.length === 0;
 
-        let filterClasses = [];
-        if (isDirective) filterClasses.push('filter-directive');
-        if (isComment) filterClasses.push('filter-comment');
-        if (isEmpty) filterClasses.push('filter-empty');
+        const filterClasses = [];
+        if (isDirective) {
+            filterClasses.push('filter-directive');
+        }
+        if (isComment) {
+            filterClasses.push('filter-comment');
+        }
+        if (isEmpty) {
+            filterClasses.push('filter-empty');
+        }
 
         // Extract instruction name and add as class
         if (!isDirective && !isComment && !isEmpty) {
@@ -913,7 +926,7 @@ export class AssemblyViewerPanel {
         return filterClasses.join(' ');
     }
 
-    private async getDiffViewContent(diffState: { kernel1: any, kernel2: any, index1: number, index2: number }, filterState: any): Promise<string> {
+    private async getDiffViewContent(diffState: { kernel1: KernelAssembly, kernel2: KernelAssembly, index1: number, index2: number }, filterState: FilterState | null): Promise<string> {
         const { kernel1, kernel2 } = diffState;
         const inheritedFilterState = filterState ? JSON.stringify(filterState) : 'null';
 
@@ -1817,10 +1830,16 @@ export class AssemblyViewerPanel {
                 const isComment = trimmedLine.startsWith('#') || trimmedLine.startsWith(';') || trimmedLine.startsWith('//');
                 const isEmpty = trimmedLine.length === 0;
 
-                let filterClasses = [];
-                if (isDirective) filterClasses.push('filter-directive');
-                if (isComment) filterClasses.push('filter-comment');
-                if (isEmpty) filterClasses.push('filter-empty');
+                const filterClasses = [];
+                if (isDirective) {
+                    filterClasses.push('filter-directive');
+                }
+                if (isComment) {
+                    filterClasses.push('filter-comment');
+                }
+                if (isEmpty) {
+                    filterClasses.push('filter-empty');
+                }
 
                 // Extract instruction name and add as class
                 if (!isDirective && !isComment && !isEmpty) {

@@ -13,12 +13,12 @@ class Logger {
         this.outputChannel.appendLine(`[${timestamp}] ${this.extensionName}: ${message}`);
     }
 
-    public error(message: string, error?: any) {
+    public error(message: string, error?: Error | unknown) {
         const timestamp = new Date().toLocaleTimeString();
         this.outputChannel.appendLine(`[${timestamp}] ${this.extensionName} ERROR: ${message}`);
         if (error) {
             this.outputChannel.appendLine(`  ${error}`);
-            if (error.stack) {
+            if (error instanceof Error && error.stack) {
                 this.outputChannel.appendLine(`  Stack: ${error.stack}`);
             }
         }
