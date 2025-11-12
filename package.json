@@ -1,0 +1,87 @@
+{
+    "name": "trident",
+    "displayName": "Trident",
+    "description": "🔱 Navigate Triton GPU assembly with bidirectional source-assembly highlighting and powerful inspection tools",
+    "version": "0.0.1",
+    "publisher": "TinkerCode",
+    "icon": "resources/icon.png",
+    "engines": {
+        "vscode": "^1.85.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "Debuggers",
+        "Visualization"
+    ],
+    "keywords": [
+        "triton",
+        "gpu",
+        "assembly",
+        "ptx",
+        "llvm"
+    ],
+    "activationEvents": [
+        "onLanguage:python"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "trident.showAssemblySideBySide",
+                "title": "Trident: Show GCN Assembly",
+                "icon": "$(chip)"
+            }
+        ],
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "trident.showAssemblySideBySide",
+                    "when": "resourceLangId == python",
+                    "group": "navigation"
+                }
+            ],
+            "editor/context": [
+                {
+                    "command": "trident.showAssemblySideBySide",
+                    "when": "resourceLangId == python",
+                    "group": "trident"
+                }
+            ]
+        },
+        "configuration": {
+            "title": "Trident",
+            "properties": {
+                "trident.cacheDirectory": {
+                    "type": "string",
+                    "default": "~/.triton/cache",
+                    "description": "Path to Triton cache directory (supports ~ for home directory)"
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "pretest": "npm run compile && npm run lint",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js",
+        "package": "vsce package",
+        "publish": "vsce publish"
+    },
+    "devDependencies": {
+        "@types/node": "20.x",
+        "@types/vscode": "^1.85.0",
+        "@typescript-eslint/eslint-plugin": "^6.15.0",
+        "@typescript-eslint/parser": "^6.15.0",
+        "@vscode/vsce": "^3.7.0",
+        "eslint": "^8.56.0",
+        "sharp": "^0.34.5",
+        "typescript": "^5.3.3"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/maawad/Trident.git"
+    },
+    "license": "MIT"
+}

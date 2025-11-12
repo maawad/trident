@@ -1,0 +1,58 @@
+# Triton Assembly Viewer Extension - Development Guidelines
+
+## Project Overview
+VS Code extension for viewing AMD GCN assembly output from Triton kernels with bidirectional source-assembly highlighting.
+
+## Architecture
+- **Extension Host**: TypeScript-based VS Code extension
+- **Cache Reading**: Searches ~/.triton/cache for compiled kernels
+- **Assembly Format**: AMD GCN only (no PTX/NVIDIA support)
+- **Environment**: Uses `module load pytorch` for Triton access
+
+## Code Style
+- Use TypeScript with strict mode enabled
+- 4 spaces for indentation
+- Prefer async/await over callbacks
+- Use ESLint rules defined in .eslintrc.json
+- Add JSDoc comments for public APIs
+
+## Key Components
+1. **tritonCompiler.ts**: Searches ~/.triton cache for GCN assembly files
+2. **assemblyViewer.ts**: WebView panel for displaying assembly
+3. **highlighting.ts**: Manages bidirectional source-assembly highlighting
+4. **extension.ts**: Main extension entry point
+
+## Development Practices
+- Always handle errors gracefully with user-friendly messages
+- Use VS Code progress indicators for long operations
+- Cache results when possible to improve performance
+- Dispose of resources properly (decorations, panels, etc.)
+
+## Testing
+- Test with actual Triton kernels in ~/.triton/cache
+- Verify GCN assembly parsing with different kernel types
+- Test highlighting synchronization between panels
+
+## GCN Assembly Specifics
+- Look for files with .s, .asm, .amdgcn extensions
+- Parse .loc directives for source line mapping
+- Identify kernels via .amdhsa_kernel or .globl directives
+- Support various GFX architectures (gfx90a, gfx908, etc.)
+
+## User Experience
+- Provide clear error messages when cache is empty
+- Show cache path and timestamps for debugging
+- Auto-refresh on file save (configurable)
+- Display multiple kernels if found in cache
+
+## Performance
+- Lazy load assembly files (don't read entire cache at once)
+- Use incremental updates when possible
+- Avoid blocking UI thread
+
+## Future Enhancements
+- Accurate source-to-assembly line mapping via debug info
+- Assembly instruction tooltips with descriptions
+- Performance metrics from compilation
+- Diff view for comparing kernel versions
+

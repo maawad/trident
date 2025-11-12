@@ -1,0 +1,33 @@
+# Compiled output
+out
+dist
+*.vsix
+
+# Dependencies
+node_modules
+
+# Test
+.vscode-test/
+coverage/
+
+# IDE
+.DS_Store
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Python
+*.pyc
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+ref/
+*.zip
