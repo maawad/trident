@@ -222,6 +222,12 @@ export class AssemblyViewerPanel {
                     case 'saveFilterState':
                         this._filterState = message.filterState;
                         break;
+                    case 'setLabel':
+                        await this.setKernelLabel(message.cachePath, message.label);
+                        break;
+                    case 'requestLabelEdit':
+                        await this.requestLabelEdit(message.cachePath, message.currentLabel);
+                        break;
                 }
             },
             null,
@@ -421,6 +427,69 @@ export class AssemblyViewerPanel {
             } catch (error) {
                 vscode.window.showErrorMessage(`Failed to clear cache: ${error}`);
             }
+        }
+    }
+
+    /**
+     * Get custom label for a kernel assembly (by cache path)
+     */
+    private getKernelLabel(cachePath: string): string | undefined {
+        if (!this._context) return undefined;
+        const labels = this._context.workspaceState.get<Record<string, string>>('kernelLabels', {});
+        return labels[cachePath];
+    }
+
+    /**
+     * Set custom label for a kernel assembly
+     */
+    private async setKernelLabel(cachePath: string, label: string | undefined): Promise<void> {
+        if (!this._context) return;
+
+        const labels = this._context.workspaceState.get<Record<string, string>>('kernelLabels', {});
+
+        if (label && label.trim()) {
+            labels[cachePath] = label.trim();
+        } else {
+            delete labels[cachePath];
+        }
+
+        await this._context.workspaceState.update('kernelLabels', labels);
+
+        // Refresh the view to show updated label
+        if (this._currentDocument) {
+            await this.updateAssembly(this._currentDocument);
+        }
+    }
+
+    /**
+     * Get display text for a kernel (timestamp + custom label if set)
+     */
+    private getKernelDisplayText(asm: KernelAssembly): string {
+        const timestamp = this.formatTimestamp(asm.timestamp);
+        const customLabel = this.getKernelLabel(asm.cachePath);
+        if (customLabel) {
+            return `${timestamp} - ${customLabel}`;
+        }
+        return timestamp;
+    }
+
+    /**
+     * Request label edit - show input dialog and set label
+     */
+    private async requestLabelEdit(cachePath: string, currentLabel: string | undefined): Promise<void> {
+        const label = await vscode.window.showInputBox({
+            prompt: 'Enter a custom label for this kernel version',
+            placeHolder: 'e.g., "Before optimization", "Version 2.0"',
+            value: currentLabel || '',
+            validateInput: (value) => {
+                // Allow empty to remove label
+                return null;
+            }
+        });
+
+        if (label !== undefined) {
+            // If user pressed Enter with empty value, remove the label
+            await this.setKernelLabel(cachePath, label || undefined);
         }
     }
 
@@ -728,14 +797,14 @@ export class AssemblyViewerPanel {
         const items = this._allAssemblies
             .map((asm, index) => ({
                 label: asm.kernelName,
-                description: this.formatTimestamp(asm.timestamp),
+                description: this.getKernelDisplayText(asm),
                 detail: asm.cachePath,
                 index: index
             }))
             .filter(item => item.index !== this._selectedKernelIndex);
 
         const selected = await vscode.window.showQuickPick(items, {
-            placeHolder: `Compare ${currentKernel.kernelName} (${this.formatTimestamp(currentKernel.timestamp)}) with...`
+            placeHolder: `Compare ${currentKernel.kernelName} (${this.getKernelDisplayText(currentKernel)}) with...`
         });
 
         if (selected) {
@@ -888,16 +957,13 @@ export class AssemblyViewerPanel {
     }
 
     private async getDiffViewContent(diffState: { kernel1: KernelAssembly, kernel2: KernelAssembly, index1: number, index2: number }, filterState: FilterState | null): Promise<string> {
-        let { kernel1, kernel2 } = diffState;
+        const { kernel1, kernel2 } = diffState;
         const inheritedFilterState = filterState ? JSON.stringify(filterState) : 'null';
 
-        // Determine which is older/newer based on timestamps
-        // Older should be on left (Old), newer on right (New)
-        const isKernel1Older = kernel1.timestamp < kernel2.timestamp;
-        if (!isKernel1Older) {
-            // Swap so older is kernel1 (left) and newer is kernel2 (right)
-            [kernel1, kernel2] = [kernel2, kernel1];
-        }
+        // Determine labels based on timestamps (don't swap kernels - user selected order)
+        const isKernel1Older = kernel1.timestamp.getTime() < kernel2.timestamp.getTime();
+        const leftLabel = isKernel1Older ? 'Old' : 'New';
+        const rightLabel = isKernel1Older ? 'New' : 'Old';
 
         // Simple line-by-line diff
         const lines1 = kernel1.assembly.split('\n');
@@ -926,8 +992,9 @@ export class AssemblyViewerPanel {
             rightHtml += `<div class="asm-line clickable ${diffClass} ${filterClasses2}" data-line="${i}" data-side="right"><span class="line-number">${lineNum}</span><span class="asm-content">${this.highlightGCNSyntax(line2 || ' ')}</span></div>\n`;
         }
 
-        const time1 = this.formatTimestamp(kernel1.timestamp);
-        const time2 = this.formatTimestamp(kernel2.timestamp);
+        // Use custom labels if available, otherwise timestamps
+        const displayText1 = this.getKernelDisplayText(kernel1);
+        const displayText2 = this.getKernelDisplayText(kernel2);
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -984,6 +1051,17 @@ export class AssemblyViewerPanel {
 
         .icon-btn:hover {
             background-color: var(--vscode-toolbar-hoverBackground);
+        }
+
+        .edit-label-btn {
+            margin-right: 4px;
+            padding: 2px 4px;
+            opacity: 0.6;
+            vertical-align: middle;
+        }
+
+        .edit-label-btn:hover {
+            opacity: 1;
         }
 
         .icon-btn .codicon {
@@ -1290,11 +1368,11 @@ export class AssemblyViewerPanel {
 
     <div class="diff-container">
         <div class="diff-side" id="left-side">
-            <div class="diff-header">Old (${time1})</div>
+            <div class="diff-header">${leftLabel} (${this.escapeHtml(displayText1)})</div>
             ${leftHtml}
         </div>
         <div class="diff-side" id="right-side">
-            <div class="diff-header">New (${time2})</div>
+            <div class="diff-header">${rightLabel} (${this.escapeHtml(displayText2)})</div>
             ${rightHtml}
         </div>
     </div>
@@ -1831,8 +1909,10 @@ export class AssemblyViewerPanel {
                 return `<div class="asm-line clickable ${filterClasses.join(' ')}" data-line="${i}" data-kernel-index="${index}"><span class="line-number">${lineNum}</span><span class="asm-content">${this.highlightGCNSyntax(line)}</span></div>`;
             }).join('');
 
-            const dateStr = this.formatTimestamp(asm.timestamp);
+            const displayText = this.getKernelDisplayText(asm);
             const fullDate = asm.timestamp.toLocaleString();
+            const customLabel = this.getKernelLabel(asm.cachePath);
+            const timestampStr = this.formatTimestamp(asm.timestamp);
             const outdatedWarning = isLatest ? '' : `
                 <div class="outdated-warning">
                     ⚠️ This is an older version. Source code may have changed. Latest version: ${this.formatTimestamp(latestByName.get(asm.kernelName)!)}
@@ -1842,7 +1922,13 @@ export class AssemblyViewerPanel {
             return `
                 <div class="kernel-section ${isLatest ? '' : 'outdated-kernel'}" id="kernel-${index}" data-kernel-name="${this.escapeHtml(asm.kernelName)}" data-is-latest="${isLatest}">
                     <div class="kernel-header">
-                        <span class="kernel-title">${this.escapeHtml(asm.kernelName)} <span class="kernel-date">(${dateStr})</span></span>
+                        <button class="icon-btn edit-label-btn" onclick="editLabel('${this.escapeHtml(asm.cachePath)}', '${this.escapeHtml(customLabel || '')}')" title="Edit label">
+                            <i class="codicon codicon-edit"></i>
+                        </button>
+                        <span class="kernel-title">
+                            ${this.escapeHtml(asm.kernelName)}
+                            <span class="kernel-date">(${this.escapeHtml(displayText)})</span>
+                        </span>
                         <span class="cache-info" title="${fullDate} - Click to open file" onclick="openCacheFile('${this.escapeHtml(asm.cachePath)}')">${asm.cachePath}</span>
                     </div>
                     ${outdatedWarning}
@@ -1853,11 +1939,11 @@ export class AssemblyViewerPanel {
             `;
         }).join('');
 
-        // Build kernel selector options with timestamps (from all assemblies)
+        // Build kernel selector options with custom labels or timestamps (from all assemblies)
         const kernelOptions = this._allAssemblies.map((asm, index) => {
-            const dateStr = this.formatTimestamp(asm.timestamp);
+            const displayText = this.getKernelDisplayText(asm);
             const selected = this._selectedKernelIndex === index ? ' selected' : '';
-            return `<option value="${index}"${selected}>${this.escapeHtml(asm.kernelName)} (${dateStr})</option>`;
+            return `<option value="${index}"${selected}>${this.escapeHtml(asm.kernelName)} (${this.escapeHtml(displayText)})</option>`;
         }).join('');
 
         // Build source file selector options (unique files)
@@ -2184,9 +2270,8 @@ export class AssemblyViewerPanel {
 
         .kernel-header {
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            gap: 16px;
+            gap: 8px;
             background-color: var(--vscode-editorWidget-background);
             padding: 12px 16px;
             border-bottom: 1px solid var(--vscode-widget-border);
@@ -2212,8 +2297,8 @@ export class AssemblyViewerPanel {
             font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
             font-size: 11px;
             color: var(--vscode-textLink-foreground);
-            text-align: right;
             opacity: 0.7;
+            margin-left: auto;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -2433,6 +2518,14 @@ export class AssemblyViewerPanel {
 
         function clearCache() {
             vscode.postMessage({ command: 'clearCache' });
+        }
+
+        function editLabel(cachePath, currentLabel) {
+            vscode.postMessage({
+                command: 'requestLabelEdit',
+                cachePath: cachePath,
+                currentLabel: currentLabel || undefined
+            });
         }
 
         function compareKernels() {
