@@ -32,6 +32,23 @@ jobs:
     - name: Run linter
       run: npm run lint
 
+    - name: Bump version for dev release
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        # Configure git for npm version command
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Get short commit SHA and date for unique dev version
+        COMMIT_SHA=$(git rev-parse --short HEAD)
+        DATE=$(date +%Y%m%d)
+        DEV_VERSION="0.0.1-dev.${DATE}.${COMMIT_SHA}"
+
+        # Update package.json version (using node to avoid git requirements)
+        node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json')); pkg.version = '$DEV_VERSION'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+
+        echo "Bumped version to $DEV_VERSION"
+
     - name: Package extension
       run: npx @vscode/vsce package
 
