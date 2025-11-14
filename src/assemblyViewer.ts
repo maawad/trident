@@ -71,6 +71,9 @@ export class AssemblyViewerPanel {
             }
         );
 
+        // Set the icon for the webview panel
+        panel.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'icon.png');
+
         AssemblyViewerPanel.currentPanel = new AssemblyViewerPanel(
             panel,
             extensionUri,
