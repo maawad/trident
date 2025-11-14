@@ -10,7 +10,11 @@ Trident is a VS Code extension that provides seamless visualization and navigati
 
 ## 🎥 Demo
 
-![Demo Video](resources/demo.mp4)
+<p align="center">
+  <video src="resources/demo.mp4" width="800" controls>
+    Your browser does not support the video tag. [Download the video](resources/demo.mp4) instead.
+  </video>
+</p>
 
 ## ✨ Features
 
