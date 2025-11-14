@@ -7,7 +7,7 @@
             "request": "launch",
             "args": [
                 "--extensionDevelopmentPath=${workspaceFolder}",
-                "${workspaceFolder}/test-workspace"
+                "/work1/amd/muhaawad/git/amd/pdp/iris"
             ],
             "outFiles": [
                 "${workspaceFolder}/out/**/*.js"

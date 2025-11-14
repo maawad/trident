@@ -265,6 +265,9 @@ export class AssemblyViewerPanel {
 
                 this._panel.webview.html = await this.getWebviewContent();
 
+                // Refresh dropdown to include all files from cache (not just open ones)
+                await this.refreshDropdown();
+
                 // If a source line was specified, highlight corresponding assembly
                 if (highlightSourceLine !== undefined) {
                     setTimeout(() => {
@@ -374,12 +377,7 @@ export class AssemblyViewerPanel {
         const normalizedPath = path.normalize(this._currentDocument.uri.fsPath);
         const key = `${normalizedPath}:${sourceLine}`;
 
-        let asmLines = this._sourceToAsmMap.get(key);
-
-        // If no direct mapping found, try to find inlined assembly between surrounding lines
-        if (!asmLines || asmLines.length === 0) {
-            asmLines = this.findInlinedAssembly(normalizedPath, sourceLine);
-        }
+        const asmLines = this._sourceToAsmMap.get(key);
 
         if (asmLines && asmLines.length > 0) {
             logger.log(`Highlighting ${asmLines.length} assembly lines for ${path.basename(normalizedPath)}:${sourceLine + 1}`);
@@ -390,94 +388,6 @@ export class AssemblyViewerPanel {
         }
     }
 
-    /**
-     * Find inlined assembly for a line with no direct mapping (e.g., function call sites)
-     * Looks for assembly from OTHER source files between surrounding lines from THIS file
-     */
-    private findInlinedAssembly(filePath: string, sourceLine: number): number[] | undefined {
-        logger.log(`Looking for inlined assembly for ${path.basename(filePath)}:${sourceLine + 1}`);
-
-        // Find the closest mapped lines before and after the current line (from the SAME file)
-        let prevLine = -1;
-        let nextLine = -1;
-
-        for (let i = sourceLine - 1; i >= 0; i--) {
-            const key = `${filePath}:${i}`;
-            if (this._sourceToAsmMap.has(key)) {
-                prevLine = i;
-                break;
-            }
-        }
-
-        for (let i = sourceLine + 1; i < sourceLine + 50; i++) {  // Look ahead up to 50 lines
-            const key = `${filePath}:${i}`;
-            if (this._sourceToAsmMap.has(key)) {
-                nextLine = i;
-                break;
-            }
-        }
-
-        logger.log(`  Found surrounding lines from ${path.basename(filePath)}: ${prevLine + 1} and ${nextLine + 1}`);
-
-        if (prevLine === -1 || nextLine === -1) {
-            logger.log(`  No surrounding lines found`);
-            return undefined;
-        }
-
-        // Get the assembly line ranges for the surrounding source lines
-        const prevAsmLines = this._sourceToAsmMap.get(`${filePath}:${prevLine}`) || [];
-        const nextAsmLines = this._sourceToAsmMap.get(`${filePath}:${nextLine}`) || [];
-
-        if (prevAsmLines.length === 0 || nextAsmLines.length === 0) {
-            logger.log(`  No assembly ranges found for surrounding lines`);
-            return undefined;
-        }
-
-        // Find the FULL assembly range (assembly might be reordered)
-        const allPrevNext = [...prevAsmLines, ...nextAsmLines];
-        const minAsm = Math.min(...allPrevNext);
-        const maxAsm = Math.max(...allPrevNext);
-
-        logger.log(`  Full assembly range: ${minAsm} to ${maxAsm} (${maxAsm - minAsm} lines total)`);
-
-        if (maxAsm > minAsm) {
-            // Find all assembly lines in this range that belong to OTHER files (inlined functions)
-            const inlinedLines: number[] = [];
-
-            for (let i = minAsm; i <= maxAsm; i++) {
-                const asmSourceFile = this._asmLineToFile.get(i);
-
-                // If this assembly line is from a DIFFERENT source file, it's inlined
-                if (asmSourceFile && asmSourceFile !== filePath) {
-                    // Check if it's an actual instruction
-                    if (this._assemblies.length > 0) {
-                        const lines = this._assemblies[0].assembly.split('\n');
-                        if (i < lines.length) {
-                            const line = lines[i];
-                            const trimmed = line.trim();
-                            const isDirective = trimmed.startsWith('.');
-                            const isComment = trimmed.startsWith('#') || trimmed.startsWith(';') || trimmed.startsWith('//');
-                            const isEmpty = trimmed.length === 0;
-                            const isLabel = trimmed.endsWith(':');
-
-                            if (!isEmpty && !isDirective && !isComment && !isLabel) {
-                                inlinedLines.push(i);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (inlinedLines.length > 0) {
-                logger.log(`  ✓ Found ${inlinedLines.length} inlined assembly lines from other files`);
-                return inlinedLines;
-            } else {
-                logger.log(`  ✗ No inlined assembly found (all assembly is from ${path.basename(filePath)})`);
-            }
-        }
-
-        return undefined;
-    }
 
     private async refreshCache() {
         if (this._currentDocument) {
@@ -512,10 +422,32 @@ export class AssemblyViewerPanel {
         // Re-scan all open files to ensure we're up to date
         this.updateOpenTritonFiles();
 
-        logger.log(`After scan: ${this._allOpenTritonFiles.size} files: ${Array.from(this._allOpenTritonFiles).map(f => path.basename(f)).join(', ')}`);
+        // Also get all source files from the cache (not just open files)
+        const allSourceFiles = new Set<string>(this._allOpenTritonFiles);
+
+        try {
+            // Get workspace folders
+            const workspaceFolders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+
+            // Get ALL assemblies from cache (without filtering by source file)
+            const allAssemblies = await this._compiler.findCachedAssemblies(undefined, workspaceFolders);
+
+            // Extract all unique source files from all assemblies
+            for (const asm of allAssemblies) {
+                for (const sourceFile of asm.sourceFiles) {
+                    allSourceFiles.add(sourceFile);
+                }
+            }
+
+            logger.log(`Found ${allAssemblies.length} total assemblies with ${allSourceFiles.size} unique source files`);
+        } catch (error) {
+            logger.error('Error scanning cache for source files', error);
+        }
+
+        logger.log(`After scan: ${allSourceFiles.size} files: ${Array.from(allSourceFiles).map(f => path.basename(f)).join(', ')}`);
 
         // Send updated file list to webview via postMessage (lightweight update)
-        const fileList = Array.from(this._allOpenTritonFiles).map(file => ({
+        const fileList = Array.from(allSourceFiles).map(file => ({
             path: file,
             basename: path.basename(file)
         }));
@@ -1902,6 +1834,21 @@ export class AssemblyViewerPanel {
         // Add ALL open Triton files from our cache
         this._allOpenTritonFiles.forEach(file => allSourceFiles.add(file));
 
+        // Also get all source files from the cache (not just open files)
+        try {
+            const workspaceFolders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+            const allAssemblies = await this._compiler.findCachedAssemblies(undefined, workspaceFolders);
+
+            // Extract all unique source files from all assemblies
+            for (const asm of allAssemblies) {
+                for (const sourceFile of asm.sourceFiles) {
+                    allSourceFiles.add(sourceFile);
+                }
+            }
+        } catch (error) {
+            logger.error('Error scanning cache for source files in getWebviewContent', error);
+        }
+
         logger.log(`Building dropdown with ${allSourceFiles.size} files: ${Array.from(allSourceFiles).map(f => path.basename(f)).join(', ')}`);
 
         const sourceFileOptions = Array.from(allSourceFiles).map(file => {
@@ -3018,6 +2965,7 @@ export class AssemblyViewerPanel {
         <div class="cache-path">${this._compiler.getCachePath()}</div>
         <p>To generate assembly:</p>
         <ol style="text-align: left; display: inline-block;">
+            <li>Run <code>module load pytorch</code></li>
             <li>Execute your Triton kernel code</li>
             <li>Click the refresh button to reload</li>
         </ol>
