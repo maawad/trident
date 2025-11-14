@@ -6,6 +6,7 @@ import { promisify } from 'util';
 const readdir = promisify(fs.readdir);
 const readFile = promisify(fs.readFile);
 const stat = promisify(fs.stat);
+const unlink = promisify(fs.unlink);
 
 export interface KernelAssembly {
     kernelName: string;
@@ -43,6 +44,54 @@ export class TritonCompiler {
      */
     public getCachePath(): string {
         return this.tritonCachePath;
+    }
+
+    /**
+     * Clear the entire Triton cache directory
+     */
+    public async clearCache(): Promise<void> {
+        // Update cache path from configuration in case it changed
+        this.updateCachePath();
+
+        if (!fs.existsSync(this.tritonCachePath)) {
+            throw new Error(`Triton cache directory not found: ${this.tritonCachePath}`);
+        }
+
+        const entries = await readdir(this.tritonCachePath);
+
+        for (const entry of entries) {
+            const entryPath = path.join(this.tritonCachePath, entry);
+            const entryStat = await stat(entryPath);
+
+            if (entryStat.isDirectory()) {
+                // Recursively delete directory
+                await this.deleteDirectory(entryPath);
+            } else {
+                // Delete file
+                await unlink(entryPath);
+            }
+        }
+    }
+
+    /**
+     * Recursively delete a directory and all its contents
+     */
+    private async deleteDirectory(dirPath: string): Promise<void> {
+        const entries = await readdir(dirPath);
+
+        for (const entry of entries) {
+            const entryPath = path.join(dirPath, entry);
+            const entryStat = await stat(entryPath);
+
+            if (entryStat.isDirectory()) {
+                await this.deleteDirectory(entryPath);
+            } else {
+                await unlink(entryPath);
+            }
+        }
+
+        // Remove the directory itself (use fs.promises for better compatibility)
+        await fs.promises.rmdir(dirPath);
     }
 
     /**

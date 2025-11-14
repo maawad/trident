@@ -195,6 +195,9 @@ export class AssemblyViewerPanel {
                     case 'refresh':
                         await this.refreshCache();
                         break;
+                    case 'clearCache':
+                        await this.clearCache();
+                        break;
                     case 'filterByFile':
                         await this.filterBySourceFile(message.sourceFile);
                         break;
@@ -395,6 +398,29 @@ export class AssemblyViewerPanel {
     private async refreshCache() {
         if (this._currentDocument) {
             await this.updateAssembly(this._currentDocument);
+        }
+    }
+
+    private async clearCache() {
+        const cachePath = this._compiler.getCachePath();
+        const result = await vscode.window.showWarningMessage(
+            `Are you sure you want to delete the Triton cache?\n\nCache location: ${cachePath}\n\nThis action cannot be undone.`,
+            { modal: true },
+            'Delete Cache'
+        );
+
+        if (result === 'Delete Cache') {
+            try {
+                await this._compiler.clearCache();
+                vscode.window.showInformationMessage('Triton cache cleared successfully');
+
+                // Refresh the view to show empty state
+                if (this._currentDocument) {
+                    await this.updateAssembly(this._currentDocument);
+                }
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to clear cache: ${error}`);
+            }
         }
     }
 
@@ -2310,6 +2336,9 @@ export class AssemblyViewerPanel {
         <button class="icon-btn" onclick="refreshCache()" title="Refresh cache - reload kernels from cache">
             <i class="codicon codicon-refresh"></i>
         </button>
+        <button class="icon-btn" onclick="clearCache()" title="Clear cache - delete all cached kernels">
+            <i class="codicon codicon-trash"></i>
+        </button>
         <button class="icon-btn" onclick="compareKernels()" ${this._allAssemblies.length < 2 ? 'disabled title="Need at least 2 kernel versions to compare"' : 'title="Compare with another version - side-by-side diff"'}>
             <i class="codicon codicon-diff"></i>
         </button>
@@ -2392,6 +2421,10 @@ export class AssemblyViewerPanel {
 
         function refreshCache() {
             vscode.postMessage({ command: 'refresh' });
+        }
+
+        function clearCache() {
+            vscode.postMessage({ command: 'clearCache' });
         }
 
         function compareKernels() {
