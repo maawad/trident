@@ -492,7 +492,9 @@ export class AssemblyViewerPanel {
      * Get custom label for a kernel assembly (by cache path)
      */
     private getKernelLabel(cachePath: string): string | undefined {
-        if (!this._context) return undefined;
+        if (!this._context) {
+            return undefined;
+        }
         const labels = this._context.workspaceState.get<Record<string, string>>('kernelLabels', {});
         return labels[cachePath];
     }
@@ -501,7 +503,9 @@ export class AssemblyViewerPanel {
      * Set custom label for a kernel assembly
      */
     private async setKernelLabel(cachePath: string, label: string | undefined): Promise<void> {
-        if (!this._context) return;
+        if (!this._context) {
+            return;
+        }
 
         const labels = this._context.workspaceState.get<Record<string, string>>('kernelLabels', {});
 
@@ -539,7 +543,7 @@ export class AssemblyViewerPanel {
             prompt: 'Enter a custom label for this kernel version',
             placeHolder: 'e.g., "Before optimization", "Version 2.0"',
             value: currentLabel || '',
-            validateInput: (value) => {
+            validateInput: (_value) => {
                 // Allow empty to remove label
                 return null;
             }
@@ -1902,7 +1906,7 @@ export class AssemblyViewerPanel {
 </html>`;
     }
 
-    private async highlightSourceLine(asmLine: number, kernelIndex?: number) {
+    private async highlightSourceLine(asmLine: number, _kernelIndex?: number) {
         // Find which source line(s) and file correspond to this assembly line
         let sourceLine = -1;
         let sourceFile: string | undefined;
@@ -2210,7 +2214,6 @@ export class AssemblyViewerPanel {
             const displayText = this.getKernelDisplayText(asm);
             const fullDate = asm.timestamp.toLocaleString();
             const customLabel = this.getKernelLabel(asm.cachePath);
-            const timestampStr = this.formatTimestamp(asm.timestamp);
             const outdatedWarning = isLatest ? '' : `
                 <div class="outdated-warning">
                     ⚠️ This is an older version. Source code may have changed. Latest version: ${this.formatTimestamp(latestByName.get(asm.kernelName)!)}

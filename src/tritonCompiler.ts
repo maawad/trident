@@ -289,11 +289,11 @@ export class TritonCompiler {
      * Search the Triton cache for assemblies matching the given kernel names
      * Groups all IR types (GCN, TTGIR, TTIR, LLVM) together per kernel
      */
-    async findCachedAssemblies(kernelNames: Set<string>, workspaceFolders?: string[]): Promise<KernelAssembly[]> {
+    async findCachedAssemblies(kernelNames: Set<string>, _workspaceFolders?: string[]): Promise<KernelAssembly[]> {
         // Update cache path from configuration in case it changed
         this.updateCachePath();
 
-        let assemblies: KernelAssembly[] = [];
+        const assemblies: KernelAssembly[] = [];
 
         try {
             if (!fs.existsSync(this.tritonCachePath)) {
@@ -507,8 +507,7 @@ export class TritonCompiler {
     /**
      * Detect IR type from file content
      */
-    private detectIRTypeFromContent(content: string, filename: string): IRType {
-        const firstLines = content.split('\n').slice(0, 20).join('\n').toLowerCase();
+    private detectIRTypeFromContent(content: string, _filename: string): IRType {
 
         // Check for TTIR first (earlier stage, uses module { syntax)
         // TTIR has module { at the start, while TTGIR has module attributes { with #ttg.* attributes
@@ -698,7 +697,7 @@ export class TritonCompiler {
         };
 
         // Build the final callsite map by resolving all callsites
-        for (const [resultLocId, { inlinedLocId, callsiteLocId }] of callsiteGraph.entries()) {
+        for (const [_resultLocId, { inlinedLocId, callsiteLocId }] of callsiteGraph.entries()) {
             const callsiteLoc = locMap.get(callsiteLocId);
 
             if (callsiteLoc) {

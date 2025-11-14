@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { KernelAssembly, IRType } from './tritonCompiler';
+import { KernelAssembly } from './tritonCompiler';
 import { logger } from './logger';
 
 /**

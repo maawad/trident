@@ -8,6 +8,10 @@
 
 Trident is a VS Code extension that provides seamless visualization and navigation of AMD GCN assembly output from Triton GPU kernels. With bidirectional highlighting, powerful filtering, and intelligent diff viewing, Trident makes understanding low-level GPU code effortless.
 
+## 🎥 Demo
+
+![Demo Video](resources/demo.mp4)
+
 ## ✨ Features
 
 ### 🔄 Bidirectional Highlighting
