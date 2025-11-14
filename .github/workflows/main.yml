@@ -45,5 +45,6 @@ jobs:
     - name: Publish to Open VSX (Dev Release)
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
-        npx @vscode/ovsx publish *.vsix --pat ${{ secrets.OPEN_VSX_SECRET }} --pre-release
+        npm install -g ovsx
+        ovsx publish *.vsix --pat ${{ secrets.OPEN_VSX_SECRET }} --pre-release
 
