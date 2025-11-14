@@ -23,7 +23,7 @@
 ## 🎥 Demo
 
 <p align="center">
-  <img src="resources/demo.gif" alt="Trident Demo" width="1000">
+  <img src="resources/demo.gif" alt="Trident Demo" width="1200">
 </p>
 
 ## 📦 Installation
