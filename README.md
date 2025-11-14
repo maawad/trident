@@ -1,3 +1,5 @@
+<h1 align="center">🔱 Trident 🔱</h1>
+
 <p align="center">
   <a href="https://github.com/maawad/trident/actions/workflows/main.yml">
     <img src="https://github.com/maawad/trident/actions/workflows/main.yml/badge.svg" alt="CI Status">
@@ -9,8 +11,6 @@
     <img src="https://img.shields.io/open-vsx/v/TinkerCode/trident?label=Open%20VSX&style=flat-square" alt="Open VSX">
   </a>
 </p>
-
-<h1 align="center">🔱 Trident 🔱</h1>
 
 <p align="center">
   <img src="resources/icon.png" alt="Trident Icon" width="128" height="128">
