@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { TritonCompiler, KernelAssembly } from './tritonCompiler';
+import { TritonCompiler, KernelAssembly, IRType } from './tritonCompiler';
 import { HighlightManager } from './highlighting';
 import { logger } from './logger';
+import { LineMappingBuilder, LineMapping } from './lineMapping';
 
 interface FilterState {
     hideDirectives: boolean;
@@ -21,10 +22,11 @@ export class AssemblyViewerPanel {
     private _currentDocument: vscode.TextDocument | undefined;
     private _assemblies: KernelAssembly[] = [];
     private _allAssemblies: KernelAssembly[] = []; // Keep all assemblies for filtering
-    private _sourceToAsmMap: Map<string, number[]> = new Map(); // Key: "filepath:line"
-    private _asmLineToFile: Map<number, string> = new Map(); // Maps assembly line to source file path
+    private _lineMapping: LineMapping = { sourceToAsm: new Map(), asmLineToFile: new Map() }; // Unified line mapping
+    private _mappingBuilder: LineMappingBuilder = new LineMappingBuilder();
     private _selectedSourceFile: string | undefined;
     private _selectedKernelIndex: number | undefined; // Track selected kernel for single-view
+    private _selectedIRType: IRType = 'gcn'; // Default to GCN
     private _allOpenTritonFiles: Set<string> = new Set();
     private _diffState: { kernel1: KernelAssembly, kernel2: KernelAssembly, index1: number, index2: number } | undefined;
     private _themeChangeTimeout: NodeJS.Timeout | undefined;
@@ -62,7 +64,7 @@ export class AssemblyViewerPanel {
 
         const panel = vscode.window.createWebviewPanel(
             'trident',
-            'Trident: GCN Assembly',
+            'Trident Assembly',
             column,
             {
                 enableScripts: true,
@@ -190,7 +192,7 @@ export class AssemblyViewerPanel {
             async message => {
                 switch (message.command) {
                     case 'highlightSource':
-                        await this.highlightSourceLine(message.line);
+                        await this.highlightSourceLine(message.line, message.kernelIndex);
                         break;
                     case 'refresh':
                         await this.refreshCache();
@@ -228,6 +230,9 @@ export class AssemblyViewerPanel {
                     case 'requestLabelEdit':
                         await this.requestLabelEdit(message.cachePath, message.currentLabel);
                         break;
+                    case 'filterByIRType':
+                        await this.filterByIRType(message.irType);
+                        break;
                 }
             },
             null,
@@ -239,35 +244,93 @@ export class AssemblyViewerPanel {
         return this._currentDocument;
     }
 
-    public highlightAssemblyForSourceLine(document: vscode.TextDocument, line: number) {
-        // Temporarily set the document for highlighting (supports clicking on any source file)
-        const previousDocument = this._currentDocument;
+    public async highlightAssemblyForSourceLine(document: vscode.TextDocument, line: number) {
+        // Set the document for highlighting (supports clicking on any source file)
+        // Keep this document as the current one (don't restore) to maintain proper state
         this._currentDocument = document;
 
-        this.highlightAssemblyFromSource(line);
+        // Detect which kernel the cursor is in
+        const pythonSource = document.getText();
+        const kernelName = this._compiler.detectKernelAtLine(pythonSource, line);
 
-        // Restore the previous document
-        this._currentDocument = previousDocument;
+        if (kernelName) {
+            // Find the kernel in the FILTERED assemblies (maintain current IR type)
+            const filteredKernel = this._assemblies.find(asm => asm.kernelName === kernelName);
+
+            if (filteredKernel) {
+                const kernelIndex = this._allAssemblies.indexOf(filteredKernel);
+
+                if (kernelIndex >= 0 && kernelIndex !== this._selectedKernelIndex) {
+                    // Auto-switch to the kernel the cursor is in (within current IR type)
+                    logger.log(`[Trident] Auto-switching to kernel: ${kernelName} (${this._selectedIRType})`);
+                    await this.jumpToKernel(kernelIndex);
+                    // Don't return here - continue to highlight the line
+                }
+            }
+        }
+
+        this.highlightAssemblyFromSource(line);
     }
 
     public async updateAssembly(document: vscode.TextDocument, highlightSourceLine?: number) {
         this._currentDocument = document;
 
         try {
-            // Get workspace folders
-            const workspaceFolders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+            // Step 1: Extract kernel names ONLY from the current document (not all open files)
+            const kernelNames = new Set<string>();
+            const content = document.getText();
+            if (content.includes('@triton.jit')) {
+                const names = this._compiler.extractKernelNames(content);
+                names.forEach(name => kernelNames.add(name));
+                logger.log(`[Trident] Found ${names.length} kernels in ${path.basename(document.uri.fsPath)}: ${names.join(', ')}`);
+            }
 
-            // Search the cache for assemblies from this source file
-            this._allAssemblies = await this._compiler.findCachedAssemblies(document.uri.fsPath, workspaceFolders);
+            if (kernelNames.size === 0) {
+                logger.log(`[Trident] No kernel names found in ${path.basename(document.uri.fsPath)}`);
+                this._panel.webview.html = this.getNoAssemblyHtml();
+                return;
+            }
+
+            logger.log(`[Trident] Searching cache for ${kernelNames.size} kernels from ${path.basename(document.uri.fsPath)}: ${Array.from(kernelNames).join(', ')}`);
+
+            // Step 2: Search cache and match by kernel name
+            const workspaceFolders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+            this._allAssemblies = await this._compiler.findCachedAssemblies(kernelNames, workspaceFolders);
 
             logger.log(`Loaded ${this._allAssemblies.length} assemblies for ${path.basename(document.uri.fsPath)}`);
             this._allAssemblies.forEach((asm, i) => {
                 logger.log(`  [${i}] ${asm.kernelName} (${this.formatTimestamp(asm.timestamp)})`);
             });
 
-            // Default to showing the firs t kernel (most recent)
-            this._selectedKernelIndex = 0;
-            this._assemblies = this._allAssemblies.length > 0 ? [this._allAssemblies[0]] : [];
+            // Filter by IR type (maintains user's selection)
+            const filteredAssemblies = this._allAssemblies.filter(asm => asm.irType === this._selectedIRType);
+
+            // Show ALL kernels (not just the first one)
+            this._assemblies = filteredAssemblies;
+
+            // Auto-select the kernel at the cursor position (if highlightSourceLine is provided)
+            if (highlightSourceLine !== undefined) {
+                const pythonSource = document.getText();
+                const kernelName = this._compiler.detectKernelAtLine(pythonSource, highlightSourceLine);
+                if (kernelName) {
+                    // Find the kernel in FILTERED assemblies (respect IR type selection)
+                    const filteredKernel = this._assemblies.find(asm => asm.kernelName === kernelName);
+                    if (filteredKernel) {
+                        const kernelIndex = this._allAssemblies.indexOf(filteredKernel);
+                        this._selectedKernelIndex = kernelIndex;
+                        logger.log(`[Trident] Auto-selected kernel at cursor: ${kernelName} (${this._selectedIRType}, index ${kernelIndex})`);
+                    } else {
+                        // Kernel not found in current IR type, select first filtered kernel
+                        this._selectedKernelIndex = this._assemblies.length > 0 ? this._allAssemblies.indexOf(this._assemblies[0]) : 0;
+                    }
+                } else {
+                    // No kernel detected at cursor, select first filtered kernel
+                    this._selectedKernelIndex = this._assemblies.length > 0 ? this._allAssemblies.indexOf(this._assemblies[0]) : 0;
+                }
+            } else {
+                // No source line specified, select first filtered kernel
+                this._selectedKernelIndex = this._assemblies.length > 0 ? this._allAssemblies.indexOf(this._assemblies[0]) : 0;
+            }
 
             if (this._assemblies.length === 0) {
                 this._panel.webview.html = this.getNoAssemblyHtml();
@@ -299,81 +362,8 @@ export class AssemblyViewerPanel {
      * Key format: "normalized_filepath:line"
      */
     private buildLineMapping() {
-        this._sourceToAsmMap.clear();
-        this._asmLineToFile.clear();
-
-        for (const asm of this._assemblies) {
-            const lines = asm.assembly.split('\n');
-            let currentSourceLine = -1;
-            let currentFileId = -1;
-
-            // First pass: build file ID to path mapping
-            const fileMap = new Map<number, string>();
-            for (const line of lines) {
-                // Parse .file directive - Format 2: .file <id> "dir" "file" (check this first!)
-                const format2Match = line.match(/\.file\s+(\d+)\s+"([^"]+)"\s+"([^"]+)"/);
-                if (format2Match) {
-                    const fileId = parseInt(format2Match[1]);
-                    const directory = format2Match[2].replace(/^;/, '');
-                    const filename = format2Match[3];
-                    fileMap.set(fileId, path.join(directory, filename));
-                    continue;
-                }
-
-                // Parse .file directive - Format 1: .file <id> "path" (single quoted string)
-                const format1Match = line.match(/\.file\s+(\d+)\s+"([^"]+)"$/);
-                if (format1Match) {
-                    const fileId = parseInt(format1Match[1]);
-                    fileMap.set(fileId, format1Match[2]);
-                }
-            }
-
-            // Second pass: map source lines to assembly lines with file tracking
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
-
-                // Parse .loc directive: .loc <file_id> <line> <column>
-                const locMatch = line.match(/\.loc\s+(\d+)\s+(\d+)\s+\d+/);
-                if (locMatch) {
-                    currentFileId = parseInt(locMatch[1]);
-                    currentSourceLine = parseInt(locMatch[2]) - 1; // Convert to 0-indexed
-                }
-
-                // Track which file this assembly line belongs to
-                if (currentFileId >= 0) {
-                    const sourceFilePath = fileMap.get(currentFileId);
-                    if (sourceFilePath) {
-                        this._asmLineToFile.set(i, path.normalize(sourceFilePath));
-                    }
-                }
-
-                // Map this assembly line to source lines with file context
-                if (currentSourceLine >= 0 && currentFileId >= 0) {
-                    const sourceFilePath = fileMap.get(currentFileId);
-                    if (sourceFilePath) {
-                        // Create composite key: "normalized_path:line"
-                        const normalizedPath = path.normalize(sourceFilePath);
-                        const key = `${normalizedPath}:${currentSourceLine}`;
-
-                        if (!this._sourceToAsmMap.has(key)) {
-                            this._sourceToAsmMap.set(key, []);
-                        }
-
-                        // Only add actual instructions (non-empty, non-directive, non-comment lines)
-                        const trimmed = line.trim();
-                        const isDirective = trimmed.startsWith('.');
-                        const isComment = trimmed.startsWith('#') || trimmed.startsWith(';') || trimmed.startsWith('//');
-                        const isEmpty = trimmed.length === 0;
-
-                        if (!isEmpty && !isDirective && !isComment) {
-                            this._sourceToAsmMap.get(key)!.push(i);
-                        }
-                    }
-                }
-            }
-        }
-
-        logger.log(`Built line mapping with ${this._sourceToAsmMap.size} source line entries across all files`);
+        // Use modular mapping builder to preprocess all mappings
+        this._lineMapping = this._mappingBuilder.buildMapping(this._allAssemblies);
     }
 
     /**
@@ -389,14 +379,82 @@ export class AssemblyViewerPanel {
         const normalizedPath = path.normalize(this._currentDocument.uri.fsPath);
         const key = `${normalizedPath}:${sourceLine}`;
 
-        const asmLines = this._sourceToAsmMap.get(key);
+        // Collect all assembly lines to highlight
+        const allAsmLines = new Set<number>();
 
-        if (asmLines && asmLines.length > 0) {
-            logger.log(`Highlighting ${asmLines.length} assembly lines for ${path.basename(normalizedPath)}:${sourceLine + 1}`);
-            this._panel.webview.postMessage({
-                command: 'highlightAssembly',
-                lines: asmLines
-            });
+        // First, add direct mappings for this source line
+        const directAsmLines = this._lineMapping.sourceToAsm.get(key);
+        if (directAsmLines) {
+            directAsmLines.forEach(line => allAsmLines.add(line));
+        }
+
+        // Check if this is a callsite (inlined function call)
+        // Look in TTIR/TTGIR assemblies for callsite info
+        // Also check nearby lines (±5 lines) to handle multi-line function calls
+        const selectedIdx = this._selectedKernelIndex ?? 0;
+        if (selectedIdx >= 0 && selectedIdx < this._allAssemblies.length) {
+            // Find the TTIR assembly for this kernel (same kernel name, different IR type)
+            const selectedKernel = this._allAssemblies[selectedIdx];
+            const ttirAssembly = this._allAssemblies.find(asm =>
+                asm.kernelName === selectedKernel.kernelName &&
+                (asm.irType === 'ttir' || asm.irType === 'ttgir')
+            );
+
+            if (ttirAssembly?.callsites) {
+                // Check current line and nearby lines for callsites
+                const linesToCheck = [];
+                for (let offset = -5; offset <= 5; offset++) {
+                    const checkLine = sourceLine + offset;
+                    if (checkLine >= 0) {
+                        linesToCheck.push(`${normalizedPath}:${checkLine}`);
+                    }
+                }
+
+                let foundCallsite = false;
+                for (const checkKey of linesToCheck) {
+                    const inlinedLocations = ttirAssembly.callsites.callsiteMap.get(checkKey);
+                    if (inlinedLocations && inlinedLocations.length > 0) {
+                        if (!foundCallsite) {
+                            logger.log(`[Trident] Found callsite at ${path.basename(checkKey)} with ${inlinedLocations.length} inlined locations`);
+                            foundCallsite = true;
+                        }
+
+                        // For each inlined location, find corresponding assembly lines
+                        for (const inlinedKey of inlinedLocations) {
+                            const inlinedAsmLines = this._lineMapping.sourceToAsm.get(inlinedKey);
+                            if (inlinedAsmLines) {
+                                inlinedAsmLines.forEach(line => allAsmLines.add(line));
+                                logger.log(`  + ${inlinedAsmLines.length} lines from ${path.basename(inlinedKey)}`);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (allAsmLines.size > 0) {
+            // Calculate the global line range for the selected kernel
+            let globalStartLine = 0;
+            for (let i = 0; i < selectedIdx; i++) {
+                globalStartLine += this._allAssemblies[i].assembly.split('\n').length;
+            }
+            const selectedKernelLines = this._allAssemblies[selectedIdx].assembly.split('\n').length;
+            const globalEndLine = globalStartLine + selectedKernelLines;
+
+            // Filter and convert to local line numbers
+            const localLines = Array.from(allAsmLines)
+                .filter(line => line >= globalStartLine && line < globalEndLine)
+                .map(line => line - globalStartLine);
+
+            if (localLines.length > 0) {
+                logger.log(`Highlighting ${localLines.length} assembly lines for ${path.basename(normalizedPath)}:${sourceLine + 1} in kernel ${this._allAssemblies[selectedIdx].kernelName}`);
+                this._panel.webview.postMessage({
+                    command: 'highlightAssembly',
+                    lines: localLines
+                });
+            } else {
+                logger.log(`No assembly lines for ${path.basename(normalizedPath)}:${sourceLine + 1} in selected kernel ${this._allAssemblies[selectedIdx].kernelName}`);
+            }
         }
     }
 
@@ -524,11 +582,21 @@ export class AssemblyViewerPanel {
         const allSourceFiles = new Set<string>(this._allOpenTritonFiles);
 
         try {
-            // Get workspace folders
-            const workspaceFolders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+            // Extract kernel names from all open Python files
+            const kernelNames = new Set<string>();
+            for (const doc of vscode.workspace.textDocuments) {
+                if (doc.languageId === 'python' && !doc.isClosed) {
+                    const content = doc.getText();
+                    if (content.includes('@triton.jit')) {
+                        const names = this._compiler.extractKernelNames(content);
+                        names.forEach(name => kernelNames.add(name));
+                    }
+                }
+            }
 
-            // Get ALL assemblies from cache (without filtering by source file)
-            const allAssemblies = await this._compiler.findCachedAssemblies(undefined, workspaceFolders);
+            // Get ALL assemblies from cache for these kernels
+            const workspaceFolders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+            const allAssemblies = kernelNames.size > 0 ? await this._compiler.findCachedAssemblies(kernelNames, workspaceFolders) : [];
 
             // Extract all unique source files from all assemblies
             for (const asm of allAssemblies) {
@@ -559,6 +627,37 @@ export class AssemblyViewerPanel {
         logger.log('Sent file dropdown update via postMessage');
     }
 
+    private async filterByIRType(irType: string) {
+        logger.log(`Filtering by IR type: ${irType}`);
+        this._selectedIRType = irType as IRType;
+
+        // Just filter the displayed assemblies, don't rebuild line mapping
+        // (line mapping is already built for all assemblies)
+        const filteredAssemblies = this._allAssemblies.filter(asm => asm.irType === this._selectedIRType);
+
+        // Update displayed assemblies (show ALL kernels)
+        this._assemblies = filteredAssemblies;
+
+        // Set selected kernel index to first filtered assembly
+        if (this._assemblies.length > 0) {
+            this._selectedKernelIndex = this._allAssemblies.indexOf(this._assemblies[0]);
+        } else {
+            this._selectedKernelIndex = 0;
+        }
+
+        // Clear highlights when changing IR type filter
+        this._highlightManager.clearHighlights();
+
+        logger.log(`Filtered to ${this._assemblies.length} assemblies of type ${irType}`);
+
+        // Update the webview without rebuilding line mapping
+        if (this._assemblies.length === 0) {
+            this._panel.webview.html = this.getNoAssemblyHtml();
+        } else {
+            this._panel.webview.html = await this.getWebviewContent();
+        }
+    }
+
     private async filterBySourceFile(sourceFile: string) {
         logger.log(`Filtering by source file: ${sourceFile ? path.basename(sourceFile) : 'current document'}`);
 
@@ -571,46 +670,73 @@ export class AssemblyViewerPanel {
 
         this._selectedSourceFile = sourceFile;
 
-        // Get workspace folders
+        // Extract kernel names ONLY from the selected source file
+        const kernelNames = new Set<string>();
+        const targetDoc = vscode.workspace.textDocuments.find(doc =>
+            doc.uri.fsPath === sourceFile && doc.languageId === 'python' && !doc.isClosed
+        );
+
+        if (targetDoc) {
+            const content = targetDoc.getText();
+            if (content.includes('@triton.jit')) {
+                const names = this._compiler.extractKernelNames(content);
+                names.forEach(name => kernelNames.add(name));
+                logger.log(`Found ${names.length} kernels in ${path.basename(sourceFile)}: ${names.join(', ')}`);
+            }
+        }
+
+        if (kernelNames.size === 0) {
+            logger.log(`No kernels found in ${path.basename(sourceFile)}`);
+            vscode.window.showWarningMessage(`No Triton kernels found in ${path.basename(sourceFile)}`);
+            // Don't switch - stay on current view
+            return;
+        }
+
+        // Load assemblies ONLY for kernels in the selected file
         const workspaceFolders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+        this._allAssemblies = await this._compiler.findCachedAssemblies(kernelNames, workspaceFolders);
 
-        // Load assemblies from the selected source file
-        this._allAssemblies = await this._compiler.findCachedAssemblies(sourceFile, workspaceFolders);
+        logger.log(`Loaded ${this._allAssemblies.length} assemblies for kernels: ${Array.from(kernelNames).join(', ')}`);
 
-        // Default to showing the first kernel
-        this._selectedKernelIndex = 0;
-        this._assemblies = this._allAssemblies.length > 0 ? [this._allAssemblies[0]] : [];
+        // Filter by the currently selected IR type (maintain user's selection)
+        const filteredAssemblies = this._allAssemblies.filter(asm => asm.irType === this._selectedIRType);
+        this._assemblies = filteredAssemblies;
 
-        logger.log(`Found ${this._allAssemblies.length} assemblies for ${path.basename(sourceFile)}, showing first one`);
-        if (this._allAssemblies.length > 0) {
-            logger.log(`Available kernels: ${this._allAssemblies.map(a => a.kernelName).join(', ')}`);
+        logger.log(`Showing ${this._assemblies.length} assemblies after IR filter (${this._selectedIRType})`);
+        if (this._assemblies.length > 0) {
+            logger.log(`Available kernels: ${this._assemblies.map(a => a.kernelName).join(', ')}`);
         }
 
         if (this._assemblies.length === 0) {
-            vscode.window.showInformationMessage(`No cached assemblies found for ${path.basename(sourceFile)}. Run the file to generate cache.`);
-            this._panel.webview.html = this.getNoAssemblyHtml();
-        } else {
-            this.buildLineMapping();
-            this._panel.webview.html = await this.getWebviewContent();
-
-            // Find the first line in assembly from this source file and jump to it
-            setTimeout(async () => {
-                const firstLine = await this.findFirstLineFromFile(sourceFile);
-                if (firstLine !== undefined) {
-                    // Open the source file at the first line
-                    await this.openSourceFile(sourceFile, firstLine.sourceLine);
-
-                    // Scroll assembly to that location
-                    this._panel.webview.postMessage({
-                        command: 'scrollToLine',
-                        line: firstLine.asmLine
-                    });
-                } else {
-                    // Just open the file at the top
-                    await this.openSourceFile(sourceFile);
-                }
-            }, 100);
+            vscode.window.showWarningMessage(`No ${this._selectedIRType.toUpperCase()} assemblies found for ${path.basename(sourceFile)}. Try a different IR type or run the file.`);
+            // Don't switch - stay on current view
+            return;
         }
+
+        // Default to showing the first kernel
+        this._selectedKernelIndex = this._allAssemblies.indexOf(this._assemblies[0]);
+
+        // Build line mapping and update view
+        this.buildLineMapping();
+        this._panel.webview.html = await this.getWebviewContent();
+
+        // Find the first line in assembly from this source file and jump to it
+        setTimeout(async () => {
+            const firstLine = await this.findFirstLineFromFile(sourceFile);
+            if (firstLine !== undefined) {
+                // Open the source file at the first line
+                await this.openSourceFile(sourceFile, firstLine.sourceLine);
+
+                // Scroll assembly to that location
+                this._panel.webview.postMessage({
+                    command: 'scrollToLine',
+                    line: firstLine.asmLine
+                });
+            } else {
+                // Just open the file at the top
+                await this.openSourceFile(sourceFile);
+            }
+        }, 100);
     }
 
     private async findFirstLineFromFile(sourceFile: string): Promise<{ sourceLine: number, asmLine: number } | undefined> {
@@ -716,13 +842,16 @@ export class AssemblyViewerPanel {
             return;
         }
 
-        // Filter to show only the selected kernel
+        // Update selected kernel index (don't filter _assemblies, keep all of them in the dropdown)
         this._selectedKernelIndex = kernelIndex;
-        this._assemblies = [this._allAssemblies[kernelIndex]];
 
-        logger.log(`Showing single kernel: ${this._assemblies[0].kernelName}`);
+        const selectedKernel = this._allAssemblies[kernelIndex];
+        logger.log(`Selected kernel: ${selectedKernel.kernelName} [${selectedKernel.irType}]`);
 
-        // Rebuild the view with only this kernel
+        // Clear any stale source code highlights when switching kernels
+        this._highlightManager.clearHighlights();
+
+        // Rebuild the view to show the selected kernel (but keep all kernels in dropdown)
         this.buildLineMapping();
         this._panel.webview.html = await this.getWebviewContent();
 
@@ -792,16 +921,23 @@ export class AssemblyViewerPanel {
         }
 
         const currentKernel = this._allAssemblies[this._selectedKernelIndex];
+        const currentIRType = currentKernel.irType;
 
-        // Build quick pick items for other kernels
+        // Build quick pick items for other kernels of the same IR type
         const items = this._allAssemblies
             .map((asm, index) => ({
                 label: asm.kernelName,
                 description: this.getKernelDisplayText(asm),
                 detail: asm.cachePath,
-                index: index
+                index: index,
+                irType: asm.irType
             }))
-            .filter(item => item.index !== this._selectedKernelIndex);
+            .filter(item => item.index !== this._selectedKernelIndex && item.irType === currentIRType);
+
+        if (items.length === 0) {
+            vscode.window.showInformationMessage(`No other ${currentIRType.toUpperCase()} kernels found to compare`);
+            return;
+        }
 
         const selected = await vscode.window.showQuickPick(items, {
             placeHolder: `Compare ${currentKernel.kernelName} (${this.getKernelDisplayText(currentKernel)}) with...`
@@ -1766,49 +1902,193 @@ export class AssemblyViewerPanel {
 </html>`;
     }
 
-    private async highlightSourceLine(asmLine: number) {
+    private async highlightSourceLine(asmLine: number, kernelIndex?: number) {
         // Find which source line(s) and file correspond to this assembly line
         let sourceLine = -1;
         let sourceFile: string | undefined;
+        let targetAsm: KernelAssembly | undefined;
+        let localLineIndex = asmLine;
+        let globalLineNum = asmLine;
 
-        // Parse the assembly to find the .loc and .file directives around this line
-        const allLines = this._assemblies.flatMap(asm => asm.assembly.split('\n'));
+        // Use _selectedKernelIndex to determine which kernel we're in
+        const selectedIdx = this._selectedKernelIndex ?? 0;
+        if (selectedIdx >= 0 && selectedIdx < this._allAssemblies.length) {
+            targetAsm = this._allAssemblies[selectedIdx];
+            localLineIndex = asmLine;
 
-        if (asmLine < allLines.length) {
-            // Walk backwards to find the most recent .file and .loc directives
-            let currentFileId = -1;
-            const fileMap = new Map<number, string>();
-
-            for (let i = 0; i <= asmLine; i++) {
-                const line = allLines[i];
-
-                // Parse .file directive
-                const format2Match = line.match(/\.file\s+(\d+)\s+"([^"]+)"\s+"([^"]+)"/);
-                if (format2Match) {
-                    const fileId = parseInt(format2Match[1]);
-                    const directory = format2Match[2].replace(/^;/, '');
-                    const filename = format2Match[3];
-                    fileMap.set(fileId, path.join(directory, filename));
-                    continue;
-                }
-
-                const format1Match = line.match(/\.file\s+(\d+)\s+"([^"]+)"/);
-                if (format1Match) {
-                    const fileId = parseInt(format1Match[1]);
-                    fileMap.set(fileId, format1Match[2]);
-                    continue;
-                }
-
-                // Parse .loc directive
-                const locMatch = line.match(/\.loc\s+(\d+)\s+(\d+)\s+\d+/);
-                if (locMatch && i <= asmLine) {
-                    currentFileId = parseInt(locMatch[1]);
-                    sourceLine = parseInt(locMatch[2]) - 1;
-                }
+            // Calculate global line number by adding offsets from previous kernels
+            let globalLineOffset = 0;
+            for (let i = 0; i < selectedIdx; i++) {
+                globalLineOffset += this._allAssemblies[i].assembly.split('\n').length;
             }
+            globalLineNum = globalLineOffset + asmLine;
 
-            if (currentFileId >= 0 && fileMap.has(currentFileId)) {
-                sourceFile = fileMap.get(currentFileId);
+            // Try to get source file from mapping using global line number
+            sourceFile = this._lineMapping.asmLineToFile.get(globalLineNum);
+
+            logger.log(`[Trident] Assembly line ${asmLine} (local) -> ${globalLineNum} (global) in kernel ${targetAsm.kernelName}`);
+        }
+
+        if (targetAsm && localLineIndex >= 0) {
+            const asmLines = targetAsm.assembly.split('\n');
+
+            if (targetAsm.irType === 'ttgir' || targetAsm.irType === 'ttir') {
+                // TTGIR and TTIR: Walk backwards to find most recent #loc = loc("filepath":line:col)
+                // Also handle loc(#locN) references
+                const locPattern1 = /#loc\s*=\s*loc\("([^"]+)":(\d+):\d+\)/;
+                const locPattern2 = /loc\("([^"]+)":(\d+):\d+\)/;
+                const locDefPattern = /#loc(\d+)\s*=\s*loc\("([^"]+)":(\d+):\d+\)/;
+                const locRefPattern = /loc\(#loc(\d+)\)/;
+
+                // First, collect all location definitions
+                const locDefMap = new Map<number, { file: string; line: number }>();
+                for (let i = 0; i < asmLines.length; i++) {
+                    const defMatch = asmLines[i].match(locDefPattern);
+                    if (defMatch) {
+                        const locId = parseInt(defMatch[1]);
+                        const filePath = defMatch[2];
+                        const lineNum = parseInt(defMatch[3]) - 1; // Convert to 0-indexed
+                        locDefMap.set(locId, { file: filePath, line: lineNum });
+                    }
+                }
+
+                logger.log(`[Trident] ${targetAsm.irType.toUpperCase()}: Looking for source line at assembly line ${localLineIndex} in ${targetAsm.kernelName}`);
+
+                for (let i = localLineIndex; i >= 0; i--) {
+                    const line = asmLines[i];
+                    let match = line.match(locPattern1);
+                    if (!match) {
+                        match = line.match(locPattern2);
+                    }
+                    if (!match) {
+                        // Try location reference
+                        const refMatch = line.match(locRefPattern);
+                        if (refMatch) {
+                            const locId = parseInt(refMatch[1]);
+                            const locDef = locDefMap.get(locId);
+                            if (locDef) {
+                                if (!sourceFile || path.normalize(locDef.file) === path.normalize(sourceFile)) {
+                                    sourceFile = locDef.file;
+                                    sourceLine = locDef.line;
+                                    logger.log(`[Trident] ${targetAsm.irType.toUpperCase()}: Found source line ${sourceLine + 1} in ${sourceFile} via loc(#loc${locId})`);
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        const filePath = match[1];
+                        if (!sourceFile || path.normalize(filePath) === path.normalize(sourceFile)) {
+                            sourceFile = filePath;
+                            sourceLine = parseInt(match[2]) - 1; // Convert to 0-indexed
+                            logger.log(`[Trident] ${targetAsm.irType.toUpperCase()}: Found source line ${sourceLine + 1} in ${filePath}`);
+                            break;
+                        }
+                    }
+                }
+            } else if (targetAsm.irType === 'llvm') {
+                // LLVM IR: Walk backwards to find most recent !dbg !N reference
+                // Then look up the !DILocation definition (already collected in buildLineMappingLLVM)
+                // We need to rebuild the maps for this specific assembly
+                const difilePattern = /!(\d+)\s*=\s*!DIFile\([^)]*filename:\s*"([^"]+)"[^)]*directory:\s*"([^"]+)"[^)]*\)/;
+                const disubprogramPattern = /!(\d+)\s*=\s*(?:distinct\s+)?!DISubprogram\([^)]*\)/;
+                const disubprogramFilePattern = /file:\s*!(\d+)/;
+                const disubprogramLinePattern = /line:\s*(\d+)/;
+                const dilocationPattern = /!(\d+)\s*=\s*!DILocation\([^)]*line:\s*(\d+)[^)]*scope:\s*!(\d+)[^)]*\)/;
+
+                // First pass: collect all !DIFile and !DISubprogram metadata
+                const fileMap = new Map<number, string>();
+                const subprogramMap = new Map<number, { file: string; line: number }>();
+                const locationMap = new Map<number, { line: number; scopeId: number }>();
+
+                for (let i = 0; i < asmLines.length; i++) {
+                    const fileMatch = asmLines[i].match(difilePattern);
+                    if (fileMatch) {
+                        const fileId = parseInt(fileMatch[1]);
+                        const filename = fileMatch[2];
+                        const directory = fileMatch[3];
+                        fileMap.set(fileId, path.join(directory, filename));
+                    }
+
+                    const subprogramMatch = asmLines[i].match(disubprogramPattern);
+                    if (subprogramMatch) {
+                        const subprogramId = parseInt(subprogramMatch[1]);
+                        const fileMatch = asmLines[i].match(disubprogramFilePattern);
+                        const lineMatch = asmLines[i].match(disubprogramLinePattern);
+                        if (fileMatch && lineMatch) {
+                            const fileId = parseInt(fileMatch[1]);
+                            const lineNum = parseInt(lineMatch[1]) - 1;
+                            const filePath = fileMap.get(fileId);
+                            if (filePath) {
+                                subprogramMap.set(subprogramId, { file: filePath, line: lineNum });
+                            }
+                        }
+                    }
+
+                    const locMatch = asmLines[i].match(dilocationPattern);
+                    if (locMatch) {
+                        const locationId = parseInt(locMatch[1]);
+                        const lineNum = parseInt(locMatch[2]) - 1;
+                        const scopeId = parseInt(locMatch[3]);
+                        locationMap.set(locationId, { line: lineNum, scopeId: scopeId });
+                    }
+                }
+
+                // Second pass: walk backwards to find !dbg !N and resolve !DILocation
+                for (let i = localLineIndex; i >= 0; i--) {
+                    const line = asmLines[i];
+                    const dbgMatch = line.match(/!dbg\s*!(\d+)/);
+                    if (dbgMatch) {
+                        const locationId = parseInt(dbgMatch[1]);
+                        const locationDef = locationMap.get(locationId);
+                        if (locationDef) {
+                            const subprogram = subprogramMap.get(locationDef.scopeId);
+                            if (subprogram) {
+                                if (!sourceFile || path.normalize(subprogram.file) === path.normalize(sourceFile)) {
+                                    sourceFile = subprogram.file;
+                                    sourceLine = locationDef.line;
+                                    logger.log(`[Trident] LLVM: Found source line ${sourceLine + 1} in ${sourceFile}`);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (targetAsm.irType === 'gcn') {
+                // GCN: Walk backwards to find most recent .file and .loc directives
+                let currentFileId = -1;
+                const fileMap = new Map<number, string>();
+
+                for (let i = 0; i <= localLineIndex; i++) {
+                    const line = asmLines[i];
+
+                    // Parse .file directive
+                    const format2Match = line.match(/\.file\s+(\d+)\s+"([^"]+)"\s+"([^"]+)"/);
+                    if (format2Match) {
+                        const fileId = parseInt(format2Match[1]);
+                        const directory = format2Match[2].replace(/^;/, '');
+                        const filename = format2Match[3];
+                        fileMap.set(fileId, path.join(directory, filename));
+                        continue;
+                    }
+
+                    const format1Match = line.match(/\.file\s+(\d+)\s+"([^"]+)"/);
+                    if (format1Match) {
+                        const fileId = parseInt(format1Match[1]);
+                        fileMap.set(fileId, format1Match[2]);
+                        continue;
+                    }
+
+                    // Parse .loc directive
+                    const locMatch = line.match(/\.loc\s+(\d+)\s+(\d+)\s+\d+/);
+                    if (locMatch) {
+                        currentFileId = parseInt(locMatch[1]);
+                        sourceLine = parseInt(locMatch[2]) - 1; // Convert to 0-indexed
+                    }
+                }
+
+                if (currentFileId >= 0 && fileMap.has(currentFileId)) {
+                    sourceFile = fileMap.get(currentFileId);
+                }
             }
         }
 
@@ -1861,7 +2141,25 @@ export class AssemblyViewerPanel {
             }
         });
 
-        const assembliesHtml = this._assemblies.map((asm, index) => {
+        // Always show only the selected kernel in the assembly view
+        // But keep all kernels in the dropdown (_assemblies)
+        let assembliesToDisplay: KernelAssembly[] = [];
+        const selectedIdx = this._selectedKernelIndex ?? -1;
+        const allAsms = this._allAssemblies ?? [];
+
+        if (selectedIdx >= 0 && selectedIdx < allAsms.length) {
+            // A kernel is selected - show only that one
+            assembliesToDisplay = [allAsms[selectedIdx]];
+        } else if (this._assemblies.length > 0) {
+            // No kernel selected - default to first filtered kernel
+            const firstIndex = allAsms.indexOf(this._assemblies[0]);
+            if (firstIndex >= 0) {
+                this._selectedKernelIndex = firstIndex;
+                assembliesToDisplay = [this._assemblies[0]];
+            }
+        }
+
+        const assembliesHtml = assembliesToDisplay.map((asm, index) => {
             const lines = asm.assembly.split('\n');
             const isLatest = latestByName.get(asm.kernelName)?.getTime() === asm.timestamp.getTime();
 
@@ -1926,6 +2224,7 @@ export class AssemblyViewerPanel {
                             <i class="codicon codicon-edit"></i>
                         </button>
                         <span class="kernel-title">
+                            <span class="ir-type-badge ir-type-${asm.irType}">${asm.irType.toUpperCase()}</span>
                             ${this.escapeHtml(asm.kernelName)}
                             <span class="kernel-date">(${this.escapeHtml(displayText)})</span>
                         </span>
@@ -1939,11 +2238,25 @@ export class AssemblyViewerPanel {
             `;
         }).join('');
 
-        // Build kernel selector options with custom labels or timestamps (from all assemblies)
-        const kernelOptions = this._allAssemblies.map((asm, index) => {
+        // Get unique IR types from all assemblies
+        const availableIRTypes = Array.from(new Set(this._allAssemblies.map(asm => asm.irType))).sort();
+        console.log(`[Trident UI] Total assemblies: ${this._allAssemblies.length}`);
+        console.log(`[Trident UI] Available IR types:`, availableIRTypes);
+        console.log(`[Trident UI] Assemblies by type:`, this._allAssemblies.reduce((acc, asm) => {
+            acc[asm.irType] = (acc[asm.irType] || 0) + 1;
+            return acc;
+        }, {} as Record<string, number>));
+        const irTypeOptions = availableIRTypes.map(irType =>
+            `<option value="${irType}"${this._selectedIRType === irType ? ' selected' : ''}>${irType.toUpperCase()}</option>`
+        ).join('');
+
+        // Build kernel selector options with custom labels or timestamps (from filtered assemblies)
+        // Use the actual index in _allAssemblies as the value, not the filtered index
+        const kernelOptions = this._assemblies.map((asm) => {
+            const actualIndex = this._allAssemblies.indexOf(asm);
             const displayText = this.getKernelDisplayText(asm);
-            const selected = this._selectedKernelIndex === index ? ' selected' : '';
-            return `<option value="${index}"${selected}>${this.escapeHtml(asm.kernelName)} (${this.escapeHtml(displayText)})</option>`;
+            const selected = this._selectedKernelIndex === actualIndex ? ' selected' : '';
+            return `<option value="${actualIndex}"${selected}>${this.escapeHtml(asm.kernelName)} [${asm.irType.toUpperCase()}] (${this.escapeHtml(displayText)})</option>`;
         }).join('');
 
         // Build source file selector options (unique files)
@@ -1959,8 +2272,19 @@ export class AssemblyViewerPanel {
 
         // Also get all source files from the cache (not just open files)
         try {
+            // Extract kernel names from all open Python files
+            const kernelNames = new Set<string>();
+            for (const doc of vscode.workspace.textDocuments) {
+                if (doc.languageId === 'python' && !doc.isClosed) {
+                    const content = doc.getText();
+                    if (content.includes('@triton.jit')) {
+                        const names = this._compiler.extractKernelNames(content);
+                        names.forEach(name => kernelNames.add(name));
+                    }
+                }
+            }
             const workspaceFolders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
-            const allAssemblies = await this._compiler.findCachedAssemblies(undefined, workspaceFolders);
+            const allAssemblies = kernelNames.size > 0 ? await this._compiler.findCachedAssemblies(kernelNames, workspaceFolders) : [];
 
             // Extract all unique source files from all assemblies
             for (const asm of allAssemblies) {
@@ -1972,14 +2296,35 @@ export class AssemblyViewerPanel {
             logger.error('Error scanning cache for source files in getWebviewContent', error);
         }
 
-        logger.log(`Building dropdown with ${allSourceFiles.size} files: ${Array.from(allSourceFiles).map(f => path.basename(f)).join(', ')}`);
+        // Only show open Python files in dropdown
+        const activeEditor = vscode.window.activeTextEditor;
+        const activeFile = activeEditor?.document.languageId === 'python' ? activeEditor.document.uri.fsPath : undefined;
+        const openPythonFiles = vscode.workspace.textDocuments
+            .filter(doc => doc.languageId === 'python' && !doc.isClosed)
+            .map(doc => doc.uri.fsPath);
 
-        const sourceFileOptions = Array.from(allSourceFiles).map(file => {
+        logger.log(`Building dropdown with ${openPythonFiles.length} open files: ${openPythonFiles.map(f => path.basename(f)).join(', ')}`);
+
+        // Categorize: current file first, then other open files
+        const currentFile = activeFile && openPythonFiles.includes(activeFile) ? activeFile : undefined;
+        const otherOpenFiles = openPythonFiles.filter(f => f !== currentFile);
+
+        // Build options with styling
+        let sourceFileOptions = '';
+
+        // Currently visible file - normal styling
+        if (currentFile) {
+            const selected = this._selectedSourceFile === currentFile ? ' selected' : '';
+            sourceFileOptions += `<option value="${this.escapeHtml(currentFile)}"${selected}>${this.escapeHtml(path.basename(currentFile))}</option>`;
+        }
+
+        // Other open files - slightly dimmed
+        for (const file of otherOpenFiles) {
             const selected = this._selectedSourceFile === file ? ' selected' : '';
-            return `<option value="${this.escapeHtml(file)}"${selected}>${this.escapeHtml(path.basename(file))}</option>`;
-        }).join('');
+            sourceFileOptions += `<option value="${this.escapeHtml(file)}"${selected} style="opacity: 0.7;">${this.escapeHtml(path.basename(file))}</option>`;
+        }
 
-        logger.log(`Generated ${sourceFileOptions.split('<option').length - 1} dropdown options`);
+        logger.log(`Generated dropdown: current=${currentFile ? path.basename(currentFile) : 'none'}, other open=${otherOpenFiles.length}`);
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -1988,7 +2333,7 @@ export class AssemblyViewerPanel {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this._panel.webview.cspSource} 'unsafe-inline' https:; script-src 'unsafe-inline'; font-src ${this._panel.webview.cspSource} https:;">
     <link href="https://unpkg.com/@vscode/codicons@latest/dist/codicon.css" rel="stylesheet" />
-    <title>GCN Assembly</title>
+    <title>Trident Assembly</title>
     <style>
         body {
             font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
@@ -2293,6 +2638,43 @@ export class AssemblyViewerPanel {
             opacity: 0.7;
         }
 
+        .ir-type-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: bold;
+            margin-right: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .ir-type-gcn {
+            background-color: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+        }
+
+
+        .ir-type-llvm {
+            background-color: rgba(33, 150, 243, 0.2);
+            color: #2196f3;
+        }
+
+        .ir-type-ttgir {
+            background-color: rgba(156, 39, 176, 0.2);
+            color: #9c27b0;
+        }
+
+        .ir-type-ttir {
+            background-color: rgba(76, 175, 80, 0.2);
+            color: #4caf50;
+        }
+
+        .ir-type-unknown {
+            background-color: rgba(158, 158, 158, 0.2);
+            color: #9e9e9e;
+        }
+
         .cache-info {
             font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
             font-size: 11px;
@@ -2388,7 +2770,7 @@ export class AssemblyViewerPanel {
         }
 
         .outdated-kernel {
-            opacity: 0.85;
+            /* opacity: 0.85; - Removed: Don't dim old kernels, just show warning banner */
         }
 
         /* GCN Assembly Syntax Highlighting */
@@ -2419,10 +2801,13 @@ export class AssemblyViewerPanel {
 </head>
 <body>
     <div class="toolbar">
-        <select class="kernel-selector" onchange="jumpToKernel(this.value)" title="Select a kernel version to view">
+        <select id="irTypeSelector" class="kernel-selector" onchange="filterByIRType(this.value)" title="Filter by IR type">
+            ${irTypeOptions}
+        </select>
+        <select id="kernelSelector" class="kernel-selector" onchange="jumpToKernel(this.value)" title="Select a kernel version to view">
             ${kernelOptions}
         </select>
-        <select class="kernel-selector" onchange="filterBySourceFile(this.value)" title="Filter by source file">
+        <select id="sourceFileSelector" class="kernel-selector" onchange="filterBySourceFile(this.value)" title="Filter by source file">
             ${sourceFileOptions}
         </select>
         <span style="flex: 1"></span>
@@ -2525,6 +2910,13 @@ export class AssemblyViewerPanel {
                 command: 'requestLabelEdit',
                 cachePath: cachePath,
                 currentLabel: currentLabel || undefined
+            });
+        }
+
+        function filterByIRType(irType) {
+            vscode.postMessage({
+                command: 'filterByIRType',
+                irType: irType
             });
         }
 
@@ -2890,8 +3282,8 @@ export class AssemblyViewerPanel {
             if (message.command === 'updateFileDropdown') {
                 console.log('Updating file dropdown with', message.files.length, 'files');
 
-                // Find the source file dropdown (second select in toolbar)
-                const sourceFileSelect = document.querySelectorAll('select.kernel-selector')[1];
+                // Find the source file dropdown by ID
+                const sourceFileSelect = document.getElementById('sourceFileSelector');
                 if (sourceFileSelect) {
                     // Build new options (no placeholder)
                     const options = [];
@@ -2978,9 +3370,20 @@ export class AssemblyViewerPanel {
                     nextBtn.disabled = true;
                 }
 
-                // Scroll first highlighted line into view
+                // Smart scroll: only scroll if the first highlighted line is not currently visible
                 if (firstVisibleLine) {
+                    const rect = firstVisibleLine.getBoundingClientRect();
+                    const viewportHeight = window.innerHeight;
+
+                    // Check if the line is outside the viewport
+                    const isAboveViewport = rect.top < 0;
+                    const isBelowViewport = rect.bottom > viewportHeight;
+
+                    if (isAboveViewport || isBelowViewport) {
+                        // Line is not visible, scroll to it
                     firstVisibleLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                    // Otherwise, line is already visible - don't scroll, keep user's position
                 }
             } else if (message.command === 'scrollToLine') {
                 // Scroll to a specific assembly line
@@ -3097,12 +3500,11 @@ export class AssemblyViewerPanel {
 </head>
 <body>
     <div class="message">
-        <h2>⚠️ No GCN Assembly Found</h2>
+        <h2>⚠️ No Assembly Found</h2>
         <p>No cached Triton kernels were found in the cache directory.</p>
         <div class="cache-path">${this._compiler.getCachePath()}</div>
         <p>To generate assembly:</p>
         <ol style="text-align: left; display: inline-block;">
-            <li>Run <code>module load pytorch</code></li>
             <li>Execute your Triton kernel code</li>
             <li>Click the refresh button to reload</li>
         </ol>
@@ -3197,6 +3599,9 @@ export class AssemblyViewerPanel {
         if (this._themeChangeTimeout) {
             clearTimeout(this._themeChangeTimeout);
         }
+
+        // Clear all source code highlights when closing viewer
+        this._highlightManager.clearHighlights();
 
         // Clear saved state when panel is closed
         if (this._context) {

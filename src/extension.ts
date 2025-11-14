@@ -84,15 +84,15 @@ export function activate(context: vscode.ExtensionContext) {
             clearTimeout(selectionTimeout);
         }
 
-        selectionTimeout = setTimeout(() => {
+        selectionTimeout = setTimeout(async () => {
             const currentLine = editor.selection.active.line;
             logger.log(`Selection changed to line ${currentLine} in ${document.fileName}`);
 
             // Clear previous custom highlights (from clicking on assembly)
             highlightManager.clearHighlights();
 
-            // Highlight the assembly for the current line
-            AssemblyViewerPanel.currentPanel?.highlightAssemblyForSourceLine(document, currentLine);
+            // Highlight the assembly for the current line (auto-switches kernel if needed)
+            await AssemblyViewerPanel.currentPanel?.highlightAssemblyForSourceLine(document, currentLine);
         }, 150); // 150ms debounce
     });
 

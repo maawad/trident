@@ -28,7 +28,7 @@
         "commands": [
             {
                 "command": "trident.showAssemblySideBySide",
-                "title": "Trident: Show GCN Assembly",
+                "title": "Trident: View Assembly",
                 "icon": "$(chip)"
             }
         ],
