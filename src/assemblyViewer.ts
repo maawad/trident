@@ -888,8 +888,16 @@ export class AssemblyViewerPanel {
     }
 
     private async getDiffViewContent(diffState: { kernel1: KernelAssembly, kernel2: KernelAssembly, index1: number, index2: number }, filterState: FilterState | null): Promise<string> {
-        const { kernel1, kernel2 } = diffState;
+        let { kernel1, kernel2 } = diffState;
         const inheritedFilterState = filterState ? JSON.stringify(filterState) : 'null';
+
+        // Determine which is older/newer based on timestamps
+        // Older should be on left (Old), newer on right (New)
+        const isKernel1Older = kernel1.timestamp < kernel2.timestamp;
+        if (!isKernel1Older) {
+            // Swap so older is kernel1 (left) and newer is kernel2 (right)
+            [kernel1, kernel2] = [kernel2, kernel1];
+        }
 
         // Simple line-by-line diff
         const lines1 = kernel1.assembly.split('\n');
