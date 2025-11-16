@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: 'patch'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Compile TypeScript
+      run: npm run compile
+
+    - name: Run linter
+      run: npm run lint
+
+    - name: Bump version
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Bump version based on input
+        npm version ${{ inputs.bump }} --no-git-tag-version
+
+        NEW_VERSION=$(node -p "require('./package.json').version")
+        echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+        echo "Bumped version to $NEW_VERSION"
+
+    - name: Commit version bump
+      run: |
+        git add package.json
+        git commit -m "Bump version to ${{ env.NEW_VERSION }} [publish]"
+        git tag -a "v${{ env.NEW_VERSION }}" -m "Release v${{ env.NEW_VERSION }}"
+
+    - name: Push changes
+      run: |
+        git push origin main
+        git push origin "v${{ env.NEW_VERSION }}"
+
+    - name: Package extension
+      run: npx @vscode/vsce package
+
+    - name: Create GitHub Release
+      uses: actions/create-release@v1
+      id: create_release
+      with:
+        tag_name: v${{ env.NEW_VERSION }}
+        release_name: Release v${{ env.NEW_VERSION }}
+        body: |
+          🔱 **Trident v${{ env.NEW_VERSION }}**
+
+          Navigate Triton GPU assembly with bidirectional source-assembly highlighting and powerful inspection tools.
+
+          ## Installation
+          1. Download the `.vsix` file below
+          2. In VS Code: Extensions → ... → Install from VSIX
+          3. Select the downloaded file
+
+          ## What's New
+          See [CHANGELOG](https://github.com/maawad/Trident/blob/main/CHANGELOG.md) for details.
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload VSIX to Release
+      uses: actions/upload-release-asset@v1
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: "trident-${{ env.NEW_VERSION }}.vsix"
+        asset_name: "trident-${{ env.NEW_VERSION }}.vsix"
+        asset_content_type: application/octet-stream
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Publish to Open VSX
+      run: |
+        npm install -g ovsx
+        ovsx publish *.vsix --pat ${{ secrets.OPEN_VSX_SECRET }}
+

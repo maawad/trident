@@ -35,26 +35,18 @@ jobs:
     - name: Bump version for dev release
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
-        # VS Code Marketplace requires major.minor.patch versions (no semver tags)
-        # We use ODD minor numbers for pre-releases (e.g., 0.1.x, 0.3.x)
-        # and EVEN minor numbers for stable releases (e.g., 0.0.x, 0.2.x)
+        # Get short commit SHA and date for unique dev version
+        COMMIT_SHA=$(git rev-parse --short HEAD)
+        DATE=$(date +%Y%m%d)
+        CURRENT_VERSION=$(node -p "require('./package.json').version.split('-')[0]")
+        DEV_VERSION="${CURRENT_VERSION}-dev.${DATE}.${COMMIT_SHA}"
 
-        # Get current version and increment patch
-        CURRENT_VERSION=$(node -p "require('./package.json').version")
-        echo "Current version: $CURRENT_VERSION"
+        # Update package.json version
+        node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json')); pkg.version = '$DEV_VERSION'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
 
-        # Use npm version to bump patch (this handles the version increment properly)
-        npm version patch --no-git-tag-version
-
-        NEW_VERSION=$(node -p "require('./package.json').version")
-        echo "Bumped version to $NEW_VERSION for pre-release"
+        echo "Bumped version to $DEV_VERSION for dev release"
 
     - name: Package extension
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      run: npx @vscode/vsce package --pre-release
-
-    - name: Package extension (non-dev)
-      if: github.ref != 'refs/heads/main' || github.event_name != 'push'
       run: npx @vscode/vsce package
 
     - name: Upload artifact
@@ -64,10 +56,10 @@ jobs:
         path: "*.vsix"
         retention-days: 90  # Keep artifacts for 90 days
 
-    - name: Publish to Open VSX (Dev Release)
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    - name: Publish to Open VSX
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push' && contains(github.event.head_commit.message, '[publish]')
       run: |
         npm install -g ovsx
-        # Try to publish, ignore if version already exists
-        ovsx publish *.vsix --pat ${{ secrets.OPEN_VSX_SECRET }} || echo "Version already published or publish failed, skipping..."
+        ovsx publish *.vsix --pat ${{ secrets.OPEN_VSX_SECRET }} || echo "Publish failed or version already exists"
+
 
