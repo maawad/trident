@@ -35,21 +35,26 @@ jobs:
     - name: Bump version for dev release
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
-        # Configure git for npm version command
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
+        # VS Code Marketplace requires major.minor.patch versions (no semver tags)
+        # We use ODD minor numbers for pre-releases (e.g., 0.1.x, 0.3.x)
+        # and EVEN minor numbers for stable releases (e.g., 0.0.x, 0.2.x)
 
-        # Get short commit SHA and date for unique dev version
-        COMMIT_SHA=$(git rev-parse --short HEAD)
-        DATE=$(date +%Y%m%d)
-        DEV_VERSION="0.0.1-dev.${DATE}.${COMMIT_SHA}"
+        # Get current version and increment patch
+        CURRENT_VERSION=$(node -p "require('./package.json').version")
+        echo "Current version: $CURRENT_VERSION"
 
-        # Update package.json version (using node to avoid git requirements)
-        node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json')); pkg.version = '$DEV_VERSION'; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
+        # Use npm version to bump patch (this handles the version increment properly)
+        npm version patch --no-git-tag-version
 
-        echo "Bumped version to $DEV_VERSION"
+        NEW_VERSION=$(node -p "require('./package.json').version")
+        echo "Bumped version to $NEW_VERSION for pre-release"
 
     - name: Package extension
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: npx @vscode/vsce package --pre-release
+
+    - name: Package extension (non-dev)
+      if: github.ref != 'refs/heads/main' || github.event_name != 'push'
       run: npx @vscode/vsce package
 
     - name: Upload artifact
