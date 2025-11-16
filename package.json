@@ -2,7 +2,7 @@
     "name": "trident",
     "displayName": "Trident",
     "description": "🔱 Navigate Triton GPU assembly with bidirectional source-assembly highlighting and powerful inspection tools",
-    "version": "0.0.1",
+    "version": "0.1.0",
     "publisher": "TinkerCode",
     "icon": "resources/icon.png",
     "engines": {

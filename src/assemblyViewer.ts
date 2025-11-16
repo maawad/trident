@@ -2504,6 +2504,23 @@ export class AssemblyViewerPanel {
             background-color: var(--vscode-dropdown-listBackground);
         }
 
+        .kernel-selector:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+            outline-offset: -1px;
+        }
+
+        /* Style dropdown options (important for Windows) */
+        .kernel-selector option {
+            background-color: var(--vscode-dropdown-background) !important;
+            color: var(--vscode-dropdown-foreground) !important;
+        }
+
+        .kernel-selector option:hover,
+        .kernel-selector option:checked {
+            background-color: var(--vscode-list-activeSelectionBackground) !important;
+            color: var(--vscode-list-activeSelectionForeground) !important;
+        }
+
         .filter-menu {
             position: fixed;
             background-color: var(--vscode-dropdown-background);
