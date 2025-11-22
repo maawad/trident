@@ -189,21 +189,21 @@ export class TritonCompiler {
     extractKernelNames(pythonSource: string): string[] {
         const kernelNames: string[] = [];
 
-        // Match @triton.jit decorated functions (handle multi-line)
-        // Look for @triton.jit (with possible arguments), then find the next def statement
+        // Match @triton.jit and @gluon.jit decorated functions (handle multi-line)
+        // Look for @triton.jit or @gluon.jit (with possible arguments), then find the next def statement
         const lines = pythonSource.split('\n');
         let nextLineIsKernel = false;
 
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
 
-            // Check for @triton.jit decorator
-            if (line.startsWith('@triton.jit') || line.startsWith('@jit')) {
+            // Check for @triton.jit or @gluon.jit decorator
+            if (line.startsWith('@triton.jit') || line.startsWith('@jit') || line.startsWith('@gluon.jit')) {
                 nextLineIsKernel = true;
                 continue;
             }
 
-            // If previous line was @triton.jit, look for def
+            // If previous line was @triton.jit or @gluon.jit, look for def
             if (nextLineIsKernel && line.startsWith('def ')) {
                 const match = line.match(/def\s+(\w+)\s*\(/);
                 if (match) {
@@ -236,13 +236,13 @@ export class TritonCompiler {
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
 
-            // Check for @triton.jit decorator
-            if (line.startsWith('@triton.jit') || line.startsWith('@jit')) {
+            // Check for @triton.jit or @gluon.jit decorator
+            if (line.startsWith('@triton.jit') || line.startsWith('@jit') || line.startsWith('@gluon.jit')) {
                 nextLineIsKernel = true;
                 continue;
             }
 
-            // If previous line was @triton.jit, look for def
+            // If previous line was @triton.jit or @gluon.jit, look for def
             if (nextLineIsKernel && line.startsWith('def ')) {
                 const match = line.match(/def\s+(\w+)\s*\(/);
                 if (match) {
